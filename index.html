@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Scheduling System</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Smart Task Scheduler</h1>
+
+        <div class="schedule-section">
+            <h4>Work Schedule</h4>
+            <div class="input-row">
+                <label>Start:</label>
+                <input type="time" id="workStart" value="08:00">
+                <label>End:</label>
+                <input type="time" id="workEnd" value="18:00">
+            </div>
+            <div class="input-row" style="margin-top:10px;">
+                <label>Break:</label>
+                <input type="time" id="breakStart" value="13:00">
+                <label>to</label>
+                <input type="time" id="breakEnd" value="14:00">
+                <button class="btn btn-purple" onclick="addBreak()">+ Add Break</button>
+            </div>
+            <div id="breaksList" style="margin-top:8px;"></div>
+        </div>
+
+        <div class="input-row">
+            <input type="text" id="taskName" placeholder="Task Name (e.g., Meeting)">
+            <input type="number" id="taskTime" placeholder="Hours" min="0.5" step="0.5">
+            <label>Priority:</label>
+            <input type="range" id="taskPriority" min="1" max="10" value="5"
+                oninput="document.getElementById('prioVal').textContent=this.value">
+            <span id="prioVal" style="font-weight:bold;">5</span>
+        </div>
+        <button class="btn btn-green" onclick="addTask()">Add Task</button>
+
+        <table>
+            <thead>
+                <tr><th>Task Name</th><th>Time (hrs)</th><th>Priority</th><th>Remove</th></tr>
+            </thead>
+            <tbody id="taskTableBody"></tbody>
+        </table>
+
+        <div class="btn-row">
+            <button class="btn btn-blue" onclick="optimize('greedy')">Optimize (Greedy)</button>
+            <button class="btn btn-purple" onclick="optimize('dp')">Optimize (DP - Max Priority)</button>
+            <button class="btn btn-red" onclick="clearAll()">Clear Tasks</button>
+        </div>
+
+        <div id="resultsSection" class="results hidden">
+            <h3 id="resultTitle">Best Schedule</h3>
+            <p><b>Tasks you should do:</b></p>
+            <div id="resultTasks"></div><br>
+            <p><b>Total Time Used:</b> <span id="resultTime"></span> hrs</p>
+            <p><b>Total Priority Earned:</b> <span id="resultPriority"></span></p>
+            <p><b>Available Time:</b> <span id="resultAvailable"></span> hrs</p>
+            <div id="scheduleTimeline" style="margin-top:15px;"></div>
+            <div style="text-align:center;margin-top:15px;">
+                <button class="btn btn-orange" onclick="setReminders()">🔔 Set Reminders</button>
+            </div>
+            <div id="reminderStatus" class="reminder-status hidden"></div>
+        </div>
+    </div>
+
+    <script>
+        let tasks = JSON.parse(localStorage.getItem("scheduler_tasks") || "[]");
+        let breaks = JSON.parse(localStorage.getItem("scheduler_breaks") || "[]");
+        let scheduledTasks = [], activeTimers = [];
+
+        function saveTasks() { localStorage.setItem("scheduler_tasks", JSON.stringify(tasks)); }
+        function saveBreaks() { localStorage.setItem("scheduler_breaks", JSON.stringify(breaks)); }
+
+        function toMin(t) { const [h, m] = t.split(":").map(Number); return h * 60 + m; }
+        function minToTime(m) {
+            return (Math.floor(m/60) < 10 ? '0' : '') + Math.floor(m/60) + ':' + (m%60 < 10 ? '0' : '') + (m%60);
+        }
+
+        function renderTable() {
+            const tbody = document.getElementById("taskTableBody");
+            if (!tasks.length) {
+                tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#999;">No tasks added yet.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = tasks.map((t, i) =>
+                `<tr><td>${t.name}</td><td>${t.time}</td><td>${t.priority}/10</td>
+                 <td><span class="remove-btn" onclick="removeTask(${i})">X</span></td></tr>`
+            ).join("");
+        }
+
+        function renderBreaks() {
+            document.getElementById("breaksList").innerHTML = breaks.map((b, i) =>
+                `<span class="break-tag">${b.start} - ${b.end} <span onclick="removeBreak(${i})">X</span></span>`
+            ).join("");
+        }
+
+        function addTask() {
+            const name = document.getElementById("taskName").value.trim();
+            const time = parseFloat(document.getElementById("taskTime").value);
+            const priority = parseInt(document.getElementById("taskPriority").value);
+            if (!name) { alert("Enter a task name!"); return; }
+            if (!time || time <= 0) { alert("Enter valid hours!"); return; }
+            tasks.push({ name, time, priority });
+            saveTasks(); renderTable();
+            document.getElementById("taskName").value = "";
+            document.getElementById("taskTime").value = "";
+            document.getElementById("taskPriority").value = "5";
+            document.getElementById("prioVal").textContent = "5";
+        }
+
+        function removeTask(i) { tasks.splice(i, 1); saveTasks(); renderTable(); }
+
+        function addBreak() {
+            const s = document.getElementById("breakStart").value;
+            const e = document.getElementById("breakEnd").value;
+            if (s && e && s < e) { breaks.push({ start: s, end: e }); saveBreaks(); renderBreaks(); }
+            else { alert("Invalid break time!"); }
+        }
+
+        function removeBreak(i) { breaks.splice(i, 1); saveBreaks(); renderBreaks(); }
+
+        function calculateAvailableTime(workStart, workEnd, breaksList) {
+            const total = toMin(workEnd) - toMin(workStart);
+            let brkMin = 0;
+            for (const b of breaksList) {
+                const bs = Math.max(toMin(b.start), toMin(workStart));
+                const be = Math.min(toMin(b.end), toMin(workEnd));
+                if (be > bs) brkMin += (be - bs);
+            }
+            return Math.max((total - brkMin) / 60.0, 0);
+        }
+
+        function optimizeGreedy(taskList, available) {
+            const sorted = [...taskList].sort((a, b) => a.time - b.time);
+            const selected = [];
+            let timeUsed = 0, prioritySum = 0;
+            for (const task of sorted) {
+                if (timeUsed + task.time <= available) {
+                    selected.push(task); timeUsed += task.time; prioritySum += task.priority;
+                }
+            }
+            return { algorithm: "Greedy (Shortest Job First)", available_time: Math.round(available * 100) / 100,
+                selected_tasks: selected, total_time_used: Math.round(timeUsed * 100) / 100,
+                total_priority: prioritySum, tasks_completed: selected.length };
+        }
+
+        function optimizeDP(taskList, available) {
+            const capacity = Math.floor(available * 60);
+            const n = taskList.length;
+            if (n === 0 || capacity <= 0)
+                return { algorithm: "Dynamic Programming (0/1 Knapsack)", available_time: Math.round(available * 100) / 100,
+                    selected_tasks: [], total_time_used: 0, total_priority: 0, tasks_completed: 0 };
+
+            const weights = taskList.map(t => Math.floor(t.time * 60));
+            const values = taskList.map(t => t.priority);
+            const dp = [];
+            for (let i = 0; i <= n; i++) dp[i] = new Array(capacity + 1).fill(0);
+
+            for (let i = 1; i <= n; i++)
+                for (let w = 0; w <= capacity; w++) {
+                    dp[i][w] = dp[i-1][w];
+                    if (weights[i-1] <= w)
+                        dp[i][w] = Math.max(dp[i][w], dp[i-1][w - weights[i-1]] + values[i-1]);
+                }
+
+            const selected = [];
+            let w = capacity;
+            for (let i = n; i > 0; i--)
+                if (dp[i][w] !== dp[i-1][w]) { selected.push(taskList[i-1]); w -= weights[i-1]; }
+            selected.reverse();
+
+            const timeUsed = selected.reduce((s, t) => s + t.time, 0);
+            const prioritySum = selected.reduce((s, t) => s + t.priority, 0);
+            return { algorithm: "Dynamic Programming (0/1 Knapsack)", available_time: Math.round(available * 100) / 100,
+                selected_tasks: selected, total_time_used: Math.round(timeUsed * 100) / 100,
+                total_priority: prioritySum, tasks_completed: selected.length };
+        }
+
+        function optimize(type) {
+            if (!tasks.length) { alert("Add some tasks first!"); return; }
+            const workStart = document.getElementById("workStart").value;
+            const workEnd = document.getElementById("workEnd").value;
+            if (toMin(workEnd) <= toMin(workStart)) { alert("Work end time must be after work start time!"); return; }
+            const available = calculateAvailableTime(workStart, workEnd, breaks);
+            showResults(type === "greedy" ? optimizeGreedy(tasks, available) : optimizeDP(tasks, available));
+        }
+
+        function calcSchedule(selectedTasks, workStart, sortedBreaks) {
+            let currentMin = toMin(workStart);
+            const workEndMin = toMin(document.getElementById("workEnd").value);
+            const schedule = [];
+            for (const task of selectedTasks) {
+                const dur = Math.round(task.time * 60);
+                for (const b of sortedBreaks) {
+                    if (currentMin >= toMin(b.start) && currentMin < toMin(b.end)) currentMin = toMin(b.end);
+                }
+                let taskEnd = currentMin + dur, pushed = true;
+                while (pushed) {
+                    pushed = false;
+                    for (const b of sortedBreaks) {
+                        const bs = toMin(b.start), be = toMin(b.end);
+                        if (currentMin < bs && taskEnd > bs) { currentMin = be; taskEnd = currentMin + dur; pushed = true; }
+                        if (currentMin >= bs && currentMin < be) { currentMin = be; taskEnd = currentMin + dur; pushed = true; }
+                    }
+                }
+                if (currentMin + dur > workEndMin) continue;
+                schedule.push({ name: task.name, time: task.time, priority: task.priority,
+                    startMin: currentMin, endMin: currentMin + dur,
+                    startTime: minToTime(currentMin), endTime: minToTime(currentMin + dur) });
+                currentMin += dur;
+            }
+            return schedule;
+        }
+
+        function showResults(data) {
+            document.getElementById("resultsSection").classList.remove("hidden");
+            document.getElementById("resultTitle").textContent = data.algorithm;
+            const tasksDiv = document.getElementById("resultTasks");
+            if (!data.selected_tasks.length) {
+                tasksDiv.innerHTML = "<p>No tasks could be scheduled.</p>";
+                document.getElementById("scheduleTimeline").innerHTML = "";
+                scheduledTasks = [];
+            } else {
+                const sortedBreaks = [...breaks].sort((a, b) => toMin(a.start) - toMin(b.start));
+                scheduledTasks = calcSchedule(data.selected_tasks, document.getElementById("workStart").value, sortedBreaks);
+                tasksDiv.innerHTML = scheduledTasks.map(t =>
+                    `<div class="result-task">${t.name} (${t.startTime} - ${t.endTime}) - Priority: ${t.priority}</div>`
+                ).join("");
+                document.getElementById("scheduleTimeline").innerHTML =
+                    '<h4 style="color:#2563eb;margin-bottom:8px;">Task Timeline:</h4>' +
+                    scheduledTasks.map(t =>
+                        `<div class="reminder-item">🕐 <b>${t.startTime}</b> - <b>${t.endTime}</b> : ${t.name} (${t.time}h)</div>`
+                    ).join("");
+            }
+            document.getElementById("resultTime").textContent = data.total_time_used;
+            document.getElementById("resultPriority").textContent = data.total_priority;
+            document.getElementById("resultAvailable").textContent = data.available_time;
+            clearReminders();
+        }
+
+        function setReminders() {
+            if (!scheduledTasks.length) { alert("No tasks scheduled! Run optimization first."); return; }
+            if (!("Notification" in window)) { alert("This browser does not support notifications."); return; }
+            Notification.requestPermission().then(perm => {
+                if (perm !== "granted") { alert("Please allow notifications to use reminders!"); return; }
+                clearReminders();
+                const now = new Date(), today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+                let count = 0;
+                for (const task of scheduledTasks) {
+                    const delay = new Date(today.getTime() + task.startMin * 60000).getTime() - now.getTime();
+                    if (delay > 0) {
+                        activeTimers.push(setTimeout(() => {
+                            new Notification("Task Reminder", {
+                                body: `Time to start: ${task.name} (${task.time}h, Priority: ${task.priority})`,
+                                icon: "https://cdn-icons-png.flaticon.com/512/1827/1827422.png"
+                            });
+                        }, delay));
+                        count++;
+                    }
+                }
+                const s = document.getElementById("reminderStatus");
+                s.classList.remove("hidden");
+                s.style.background = "#dcfce7"; s.style.borderColor = "#86efac"; s.style.color = "#166534";
+                if (count > 0) s.innerHTML = `🔔 ${count} reminder(s) set! Keep this tab open.`;
+                else { s.style.background = "#fef2f2"; s.style.borderColor = "#fca5a5"; s.style.color = "#991b1b";
+                    s.innerHTML = "⚠️ All tasks are scheduled for a time that has already passed today."; }
+            });
+        }
+
+        function clearReminders() {
+            activeTimers.forEach(t => clearTimeout(t)); activeTimers = [];
+            const s = document.getElementById("reminderStatus");
+            if (s) s.classList.add("hidden");
+        }
+
+        function clearAll() {
+            if (!confirm("Clear all tasks and breaks?")) return;
+            tasks = []; breaks = [];
+            saveTasks(); saveBreaks(); renderTable(); renderBreaks();
+            document.getElementById("resultsSection").classList.add("hidden");
+            clearReminders(); scheduledTasks = [];
+        }
+
+        renderTable();
+        renderBreaks();
+    </script>
+</body>
+</html>
